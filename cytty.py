@@ -8,6 +8,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QPushButton, QTextEdit, QLabel, 
                             QComboBox, QSlider, QGroupBox, QCheckBox, QSpinBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
+import random
+import plotting_polar
 
 class UARTFormatSettings:
     """Class to store UART format settings"""
@@ -39,6 +41,16 @@ class UARTFormatSettings:
         
         return message
 
+class EnterToSendTextEdit(QTextEdit):
+    enter_pressed = pyqtSignal()
+
+    def keyPressEvent(self, event):
+        if (event.key() in (Qt.Key_Return, Qt.Key_Enter)) and not (event.modifiers() & Qt.ShiftModifier):
+            self.enter_pressed.emit()
+        else:
+            super().keyPressEvent(event)
+
+
 class SpeechRecognitionThread(QThread):
     text_recognized = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
@@ -51,13 +63,15 @@ class SpeechRecognitionThread(QThread):
         self.uart_settings = uart_settings
         self.running = True
         self.paused = False
-    
+        # Buffer so that we don't accidentally overflow CyBot's memory
+        self.buffer = ""
+        self.char_threshold = 15
+
     def run(self):
         while self.running:
             if not self.paused:
                 try:
                     with sr.Microphone() as source:
-                        # adjust for ambient noise
                         self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
                         try:
                             audio_text = self.recognizer.listen(source, timeout=None, phrase_time_limit=10)
@@ -65,19 +79,58 @@ class SpeechRecognitionThread(QThread):
                                 text = self.recognizer.recognize_google(audio_text)
                                 self.text_recognized.emit(text)
                                 
-                                # Format and send message in UART format
-                                uart_formatted = self.uart_settings.format_message(text)
-                                self.socket_conn.sendall(uart_formatted)
+                                # Add recognized text to buffer
+                                self.buffer += text + " "
+                                
+                                if len(self.buffer.strip()) >= self.char_threshold:
+                                    # Send immediately if threshold met
+                                    uart_formatted = self.uart_settings.format_message(self.buffer.strip())
+                                    self.socket_conn.sendall(uart_formatted)
+                                    self.buffer = ""  # Reset after sending
                                 
                             except sr.UnknownValueError:
-                                pass
+                                # Even if speech not understood, check if buffer needs to be flushed
+                                if self.buffer.strip():
+                                    uart_formatted = self.uart_settings.format_message(self.buffer.strip())
+                                    self.socket_conn.sendall(uart_formatted)
+                                    self.buffer = ""
                             except sr.RequestError as e:
                                 self.error_occurred.emit(f"Google Speech Recognition service error: {e}")
                         except sr.WaitTimeoutError:
-                            pass
+                            # No speech for a long time
+                            if self.buffer.strip():
+                                uart_formatted = self.uart_settings.format_message(self.buffer.strip())
+                                self.socket_conn.sendall(uart_formatted)
+                                self.buffer = ""
                 except Exception as e:
                     self.error_occurred.emit(f"Error in speech recognition: {e}")
             time.sleep(0.1)
+    # def run(self):
+    #     while self.running:
+    #         if not self.paused:
+    #             try:
+    #                 with sr.Microphone() as source:
+    #                     # adjust for ambient noise
+    #                     self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+    #                     try:
+    #                         audio_text = self.recognizer.listen(source, timeout=None, phrase_time_limit=10)
+    #                         try:
+    #                             text = self.recognizer.recognize_google(audio_text)
+    #                             self.text_recognized.emit(text)
+                                
+    #                             # Format and send message in UART format
+    #                             uart_formatted = self.uart_settings.format_message(text)
+    #                             self.socket_conn.sendall(uart_formatted)
+                                
+    #                         except sr.UnknownValueError:
+    #                             pass
+    #                         except sr.RequestError as e:
+    #                             self.error_occurred.emit(f"Google Speech Recognition service error: {e}")
+    #                     except sr.WaitTimeoutError:
+    #                         pass
+    #             except Exception as e:
+    #                 self.error_occurred.emit(f"Error in speech recognition: {e}")
+    #         time.sleep(0.1)
     
     def stop(self):
         self.running = False
@@ -314,7 +367,10 @@ class SpeechRecognitionGUI(QMainWindow):
         input_group = QGroupBox("Manual Text Input")
         input_layout = QHBoxLayout()
         
-        self.text_input = QTextEdit()
+        # self.text_input = QTextEdit()
+        self.text_input = EnterToSendTextEdit()
+        self.text_input.enter_pressed.connect(self.send_text)
+
         self.text_input.setMaximumHeight(60)
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self.send_text)
@@ -448,14 +504,68 @@ class SpeechRecognitionGUI(QMainWindow):
         self.start_button.setEnabled(True)
         self.send_button.setEnabled(True)
         self.send_hex_button.setEnabled(True)
-    
     def on_server_message(self, message):
-        if self.show_hex_checkbox.isChecked() and isinstance(message, str):
-            hex_repr = ' '.join(f'{ord(c):02x}' for c in message)
-            self.log(f"Server: {message} [Hex: {hex_repr}]")
-        else:
-            self.log(f"Server: {message}")
-    
+        if not hasattr(self, 'polar_data_buffer'):
+            self.polar_data_buffer = ""  # Initialize buffer on first call
+        
+        if isinstance(message, str):
+            # Always log message as normal
+            if self.show_hex_checkbox.isChecked():
+                hex_repr = ' '.join(f'{ord(c):02x}' for c in message)
+                self.log(f"Server: {message} [Hex: {hex_repr}]")
+            else:
+                self.log(f"Server: {message}")
+            
+            # Check if message contains polar data header or data
+            if message.startswith("Angle(Degrees)") or self.polar_data_buffer:
+                self.polar_data_buffer += message
+                
+                if "--- END ---" in self.polar_data_buffer:
+                    self.log("Received complete polar plot data, creating plot...")
+                    
+                    # Save polar plot data to a file
+                    new_filename = f"polar-plot-{random.randint(1000, 9999)}.txt"
+                    try:
+                        with open(new_filename, "w") as f:
+                            f.write(self.polar_data_buffer.replace("--- END ---", ""))
+                        self.log(f"Data saved to file: {new_filename}")
+                        
+                        # Call the plotting function
+                        try:
+                            plotting_polar.plot(new_filename)
+                            self.log("Polar plot created successfully")
+                        except Exception as e:
+                            self.log(f"Error creating polar plot: {e}")
+                    except Exception as e:
+                        self.log(f"Error saving data to file: {e}")
+                    
+                    # Clear buffer after processing
+                    self.polar_data_buffer = ""
+        
+    # def on_server_message(self, message):
+    #     if self.show_hex_checkbox.isChecked() and isinstance(message, str):
+    #         hex_repr = ' '.join(f'{ord(c):02x}' for c in message)
+    #         self.log(f"Server: {message} [Hex: {hex_repr}]")
+    #     else:
+    #         self.log(f"Server: {message}")
+        
+    #     if isinstance(message, str) and message.startswith("Angle(Degrees)"):
+    #         self.log("Data Received for polar plot, creating a polar plot")
+    #         # Save polar plot data to file
+    #         new_filename = f"polar-plot-{random.randint(1000, 9999)}.txt"
+    #         try:
+    #             with open(new_filename, "w") as f:
+    #                 f.write(message)
+    #             self.log(f"Data saved to file: {new_filename}")
+                
+    #             # Call the plotting function
+    #             try:
+    #                 plotting_polar.plot(new_filename)
+    #                 self.log("Polar plot created successfully")
+    #             except Exception as e:
+    #                 self.log(f"Error creating polar plot: {e}")
+    #         except Exception as e:
+    #             self.log(f"Error saving data to file: {e}")
     def start_speech_recognition(self):
         if not self.server_thread or not self.server_thread.connected:
             self.log("Not connected to server")
