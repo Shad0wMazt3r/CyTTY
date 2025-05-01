@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
 import random
 import plotting_polar
+import os
+import sys
 
 class UARTFormatSettings:
     """Class to store UART format settings"""
@@ -105,32 +107,6 @@ class SpeechRecognitionThread(QThread):
                 except Exception as e:
                     self.error_occurred.emit(f"Error in speech recognition: {e}")
             time.sleep(0.1)
-    # def run(self):
-    #     while self.running:
-    #         if not self.paused:
-    #             try:
-    #                 with sr.Microphone() as source:
-    #                     # adjust for ambient noise
-    #                     self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-    #                     try:
-    #                         audio_text = self.recognizer.listen(source, timeout=None, phrase_time_limit=10)
-    #                         try:
-    #                             text = self.recognizer.recognize_google(audio_text)
-    #                             self.text_recognized.emit(text)
-                                
-    #                             # Format and send message in UART format
-    #                             uart_formatted = self.uart_settings.format_message(text)
-    #                             self.socket_conn.sendall(uart_formatted)
-                                
-    #                         except sr.UnknownValueError:
-    #                             pass
-    #                         except sr.RequestError as e:
-    #                             self.error_occurred.emit(f"Google Speech Recognition service error: {e}")
-    #                     except sr.WaitTimeoutError:
-    #                         pass
-    #             except Exception as e:
-    #                 self.error_occurred.emit(f"Error in speech recognition: {e}")
-    #         time.sleep(0.1)
     
     def stop(self):
         self.running = False
@@ -478,6 +454,7 @@ class SpeechRecognitionGUI(QMainWindow):
             self.server_thread.start()
         except ValueError:
             self.log("Invalid port number")
+            self.log("Try port 228!")
         except Exception as e:
             self.log(f"Error: {e}")
     
@@ -522,7 +499,32 @@ class SpeechRecognitionGUI(QMainWindow):
                 
                 if "--- END ---" in self.polar_data_buffer:
                     self.log("Received complete polar plot data, creating plot...")
-                    
+
+                    # # NOTE: Only for pyinstaller. CHANGE BACK AFTER COMPILING
+                    # # Get the directory where the executable is located
+                    # if getattr(sys, 'frozen', False):
+                    #     # If the application is run as a bundle (compiled with PyInstaller)
+                    #     application_path = sys._MEIPASS
+                    # else:
+                    #     # If the application is run as a script
+                    #     application_path = os.path.dirname(os.path.abspath(__file__))
+
+                    # # Use absolute path for the new filename
+                    # new_filename = os.path.join(application_path, f"polar-plot-{random.randint(1000, 9999)}.txt")
+                    # try:
+                    #     with open(new_filename, "w") as f:
+                    #         f.write(self.polar_data_buffer.replace("--- END ---", ""))
+                    #     self.log(f"Data saved to file: {new_filename}")
+                        
+                    #     # Call the plotting function with absolute path
+                    #     try:
+                    #         plotting_polar.plot(new_filename)
+                    #         self.log("Polar plot created successfully")
+                    #     except Exception as e:
+                    #         self.log(f"Error creating polar plot: {e}")
+                    # except Exception as e:
+                    #     self.log(f"Error saving data to file: {e}")
+ 
                     # Save polar plot data to a file
                     new_filename = f"polar-plot-{random.randint(1000, 9999)}.txt"
                     try:
@@ -542,30 +544,6 @@ class SpeechRecognitionGUI(QMainWindow):
                     # Clear buffer after processing
                     self.polar_data_buffer = ""
         
-    # def on_server_message(self, message):
-    #     if self.show_hex_checkbox.isChecked() and isinstance(message, str):
-    #         hex_repr = ' '.join(f'{ord(c):02x}' for c in message)
-    #         self.log(f"Server: {message} [Hex: {hex_repr}]")
-    #     else:
-    #         self.log(f"Server: {message}")
-        
-    #     if isinstance(message, str) and message.startswith("Angle(Degrees)"):
-    #         self.log("Data Received for polar plot, creating a polar plot")
-    #         # Save polar plot data to file
-    #         new_filename = f"polar-plot-{random.randint(1000, 9999)}.txt"
-    #         try:
-    #             with open(new_filename, "w") as f:
-    #                 f.write(message)
-    #             self.log(f"Data saved to file: {new_filename}")
-                
-    #             # Call the plotting function
-    #             try:
-    #                 plotting_polar.plot(new_filename)
-    #                 self.log("Polar plot created successfully")
-    #             except Exception as e:
-    #                 self.log(f"Error creating polar plot: {e}")
-    #         except Exception as e:
-    #             self.log(f"Error saving data to file: {e}")
     def start_speech_recognition(self):
         if not self.server_thread or not self.server_thread.connected:
             self.log("Not connected to server")
@@ -591,7 +569,8 @@ class SpeechRecognitionGUI(QMainWindow):
             self.log("Speech recognition started")
         except Exception as e:
             self.log(f"Error starting speech recognition: {e}")
-    
+
+    # Latency here: find the cause
     def stop_speech_recognition(self):
         if self.speech_thread and self.speech_thread.isRunning():
             self.speech_thread.stop()
@@ -640,6 +619,8 @@ class SpeechRecognitionGUI(QMainWindow):
             if success:
                 formatted_text = self.uart_settings.format_message(text)
                 if self.show_hex_checkbox.isChecked() and isinstance(formatted_text, bytes):
+                    # {b:02x} check the binary data you receive and maybe space it out, and also format it to plaintext?
+                    # Optional 
                     hex_repr = ' '.join(f'{b:02x}' for b in formatted_text)
                     self.log(f"Sent: {text} [Hex: {hex_repr}]")
                 else:
@@ -649,6 +630,8 @@ class SpeechRecognitionGUI(QMainWindow):
                 self.log("Failed to send message")
     
     def send_hex(self):
+
+        # Put this in a different function, its used in a bunch of functions
         if not self.server_thread or not self.server_thread.connected:
             self.log("Not connected to server")
             return
